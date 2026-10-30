@@ -1,0 +1,251 @@
+// ══════════════════════════════════════════════
+//  UI.JS — exportar el informe CSV, navegación entre vistas y modales.
+// ══════════════════════════════════════════════
+// ── INFORME ──
+function renderInforme() {
+    const busquedas = datosPanel(); // resumen del historial completo (ver core.js)
+    const total       = busquedas.length;
+    const cerradas    = busquedas.filter(b => b.status === 'Cerrada' || b.status === 'Finalizada').length;
+    const staff       = busquedas.filter(b => b.tipo === 'Staff').length;
+    const fabrica     = busquedas.filter(b => b.tipo === 'Fábrica').length;
+    const coberturaStaff   = staff   ? Math.round((busquedas.filter(b => b.tipo === 'Staff'   && (b.status === 'Cerrada' || b.status === 'Finalizada')).length / staff)   * 100) : 0;
+    const coberturaFabrica = fabrica ? Math.round((busquedas.filter(b => b.tipo === 'Fábrica' && (b.status === 'Cerrada' || b.status === 'Finalizada')).length / fabrica) * 100) : 0;
+    const conIngreso  = busquedas.filter(b => b.ingreso).length;
+    const retenidos90 = busquedas.filter(b => b.ingreso && daysDiff(b.ingreso, b.fecha_baja || null) >= 90).length;
+    const tasaPermanencia = conIngreso ? Math.round((retenidos90 / conIngreso) * 100) : 0;
+    const alertas72   = busquedas.filter(alertaSectorVencido).length;
+
+    // ── Antigüedad de búsquedas abiertas: de más vieja a más nueva, para saber dónde mirar primero
+    //    (a diferencia de "Fuera de plazo" que es binario, esto ordena TODO lo abierto por urgencia) ──
+    const abiertas = busquedas
+        .filter(b => b.status === 'Proceso')
+        .map(b => ({ b, dias: daysDiff(b.inicio), lim: DEMORA_LIMITE[b.nivel] || 15 }))
+        .sort((a, c) => c.dias - a.dias);
+
+    // ── Ofertas sin decisión del sector: cuello de botella real que el código ya detecta
+    //    (datosIncompletos) pero que hasta ahora no se mostraba en ningún lado ──
+    const ofertasSinDecision = busquedas.filter(b => (b.candidatos || []).some(c => c.estado === 'Oferta') && !b.decision_sector);
+
+    // ── Quiénes ya cumplieron los 90 días hábiles (mismo corte que pasa el estado a
+    //    "Finalizada" automáticamente) — el KPI de arriba da el número, esto da los nombres ──
+    const retenidosList = busquedas
+        .filter(b => b.ingreso && daysDiff(b.ingreso, b.fecha_baja || null) >= 90)
+        .map(b => ({ b, dias: daysDiff(b.ingreso, b.fecha_baja || null) }))
+        .sort((a, c) => c.dias - a.dias);
+
+    const seccion = (titulo, sub) => `<div style="margin:28px 0 12px"><div class="section-hdr" style="font-size:12px;letter-spacing:1px">${titulo}</div><div class="tip" style="font-style:normal">${sub}</div></div>`;
+
+    document.getElementById('informe-content').innerHTML = `
+    ${seccion('Volumen y cobertura', 'Cuántas búsquedas hay en total y qué porcentaje ya se cubrió.')}
+    <div class="mini-kpi-row">
+        <div class="mini-kpi"><div class="mini-kpi-num">${total}</div><div class="mini-kpi-lbl">Total búsquedas</div></div>
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:var(--green)">${cerradas}</div><div class="mini-kpi-lbl">Cerradas / Finalizadas</div></div>
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:var(--blue)">${coberturaStaff}%</div><div class="mini-kpi-lbl">Cobertura Staff (Oficina)</div></div>
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:var(--green)">${coberturaFabrica}%</div><div class="mini-kpi-lbl">Cobertura Fábrica</div></div>
+    </div>
+
+    ${seccion('Riesgos y alertas', 'Lo que conviene revisar primero: qué se demora, qué está trabado y quién queda.')}
+    <div class="mini-kpi-row">
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:var(--red)">${alertas72}</div><div class="mini-kpi-lbl">Alertas 72hs sector</div></div>
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:${ofertasSinDecision.length ? 'var(--red)' : 'var(--green)'}">${ofertasSinDecision.length}</div><div class="mini-kpi-lbl">Ofertas sin Decisión</div></div>
+        <div class="mini-kpi"><div class="mini-kpi-num" style="color:var(--accent-dark)">${tasaPermanencia}%</div><div class="mini-kpi-lbl">Tasa de Permanencia</div></div>
+    </div>
+
+    <div style="margin-top:20px">
+        <div class="chart-card full">
+            <div class="chart-card-title"><i class="fas fa-hourglass-half"></i> Búsquedas abiertas más antiguas · ${abiertas.length}</div>
+            <div class="tip" style="display:block;margin:-8px 0 12px">Ordenadas de la más urgente a la más nueva — la columna "Días háb." en rojo ya pasó el límite normal para ese nivel de puesto.</div>
+            ${abiertas.length ? `
+            <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">
+                <thead><tr>${['N°', 'Puesto', 'Selector', 'Días háb.', 'Límite'].map(h => `<th style="padding:8px 10px;font-family:'DM Mono',monospace;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:1px;color:var(--muted);border-bottom:1px solid var(--border);text-align:left">${h}</th>`).join('')}</tr></thead>
+                <tbody>${abiertas.slice(0, 10).map(({ b, dias, lim }, i) => `<tr style="background:${i % 2 === 0 ? 'var(--bg)' : 'transparent'}">
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace">${esc(b.numero)}</td>
+                    <td style="padding:8px 10px">${esc(b.puesto)}</td>
+                    <td style="padding:8px 10px;color:var(--muted)">${esc(b.selector)}</td>
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace;font-weight:700;color:${dias > lim ? 'var(--red)' : 'var(--text)'}">${dias}hd</td>
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace;color:var(--muted)">${lim}hd</td>
+                </tr>`).join('')}</tbody>
+            </table></div>
+            ${abiertas.length > 10 ? `<div style="font-size:11px;color:var(--muted);margin-top:8px">+ ${abiertas.length - 10} más — descargá el CSV de arriba para verlas todas</div>` : ''}
+            ` : `<span class="tip">No hay búsquedas en proceso</span>`}
+        </div>
+    </div>
+
+    <div style="margin-top:20px">
+        <div class="chart-card full">
+            <div class="chart-card-title"><i class="fas fa-file-signature"></i> Ofertas sin Decisión del Sector · ${ofertasSinDecision.length}</div>
+            <div class="tip" style="display:block;margin:-8px 0 12px">El candidato ya tiene una oferta hecha pero todavía no se cargó si el sector la aprobó o no.</div>
+            ${ofertasSinDecision.length ? `
+            <div>${ofertasSinDecision.map(b => `<div class="bar-row"><div class="bar-row-top"><span>${esc(b.puesto)} <span style="font-size:11px;color:var(--muted)">· ${esc(b.selector)}</span></span><span style="font-size:11px;color:var(--muted)">${esc(b.numero)}</span></div></div>`).join('')}</div>
+            ` : `<span class="tip">Sin ofertas pendientes de decisión</span>`}
+        </div>
+    </div>
+
+    <div style="margin-top:20px">
+        <div class="chart-card full">
+            <div class="chart-card-title"><i class="fas fa-user-check"></i> Cumplieron 90 Días Hábiles (Retención) · ${retenidosList.length}</div>
+            <div class="tip" style="display:block;margin:-8px 0 12px">Ingresos que ya llegaron al corte de 90 días hábiles que usa la Tasa de Permanencia de arriba.</div>
+            ${retenidosList.length ? `
+            <div style="overflow-x:auto"><table style="width:100%;min-width:640px;border-collapse:collapse">
+                <thead><tr>${['N°', 'Ingresó', 'Puesto', 'Selector', 'Fecha ingreso', 'Días háb.', 'Estado actual'].map(h => `<th style="padding:8px 10px;font-family:'DM Mono',monospace;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:1px;color:var(--muted);border-bottom:1px solid var(--border);text-align:left">${h}</th>`).join('')}</tr></thead>
+                <tbody>${retenidosList.map(({ b, dias }, i) => `<tr style="background:${i % 2 === 0 ? 'var(--bg)' : 'transparent'}">
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace">${esc(b.numero)}</td>
+                    <td style="padding:8px 10px;font-weight:700">${esc(b.ingreso_nombre || '—')}</td>
+                    <td style="padding:8px 10px">${esc(b.puesto)}</td>
+                    <td style="padding:8px 10px;color:var(--muted)">${esc(b.selector)}</td>
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace;color:var(--muted)">${fmtFechaCorta(b.ingreso)}</td>
+                    <td style="padding:8px 10px;font-family:'DM Mono',monospace;font-weight:700;color:var(--green)">${dias}hd</td>
+                    <td style="padding:8px 10px">${b.fecha_baja ? `<span style="color:var(--red)">Se dio de baja el ${fmtFechaCorta(b.fecha_baja)}</span>` : `<span style="color:var(--green)">Activo</span>`}</td>
+                </tr>`).join('')}</tbody>
+            </table></div>
+            ` : `<span class="tip">Todavía no hay candidatos que hayan llegado a 90 días hábiles</span>`}
+        </div>
+    </div>`;
+}
+
+function csvEscape(val) {
+    if (val === null || val === undefined) return '';
+    const s = String(val);
+    return /[",;\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+async function descargarInformeCSV() {
+    // Con la vista liviana en memoria solo hay activas + últimos meses: el informe tiene
+    // que salir completo, así que se baja el historial (paginado) justo antes de exportar.
+    // El informe sale del resumen del historial completo (función busquedas_resumen).
+    // Si esa función no está creada, se baja el historial completo como antes.
+    if (!resumenPanel) await cargarResumenPanel();
+    if (!resumenPanel && !historialCompleto) {
+        toast('Cargando historial completo para el informe…');
+        const ok = await loadDataFull(true);
+        if (!ok) return; // loadDataFull ya mostró el error
+    }
+    const busquedas = datosPanel();
+    // Filtro opcional por selector (dropdown al lado del botón) — para exportar solo lo de
+    // una persona sin tener que filtrar en Excel después de descargar todo.
+    const selectorFiltro = document.getElementById('informe-selector-filter')?.value || '';
+    const base = selectorFiltro ? busquedas.filter(b => b.selector === selectorFiltro) : busquedas;
+    const headers = ['Número','Puesto','Departamento','Tipo','Selector','Motivo','Nivel','Estado',
+        'Fecha Apertura','Enviado al Sector','Decisión del Sector','Fecha Ingreso','Ingresado','Fecha Baja',
+        'Total Proceso (hd)','Total Ajustado (hd)','Candidatos Enviados','Reabierta','Alerta 72hs','Datos Incompletos'];
+    const rows = base.map(b => {
+        const t = tramosDemora(b);
+        const ajustado = Math.max(0, t.total - descuentoJustificadoTotal(b));
+        return [
+            b.numero, b.puesto, b.depto, b.tipo, b.selector, b.motivo, b.nivel, b.status,
+            b.inicio || '', b.cp || '', b.decision_sector || '', b.ingreso || '', b.ingreso_nombre || '', b.fecha_baja || '',
+            t.total, ajustado, (b.candidatos || []).length,
+            b.reopened_from ? 'Sí' : 'No', alertaSectorVencido(b) ? 'Sí' : 'No', datosIncompletos(b) ? 'Sí' : 'No'
+        ];
+    });
+    const csv = [headers, ...rows].map(r => r.map(csvEscape).join(';')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `informe_selecciones${selectorFiltro ? '_' + selectorFiltro.toLowerCase().replace(/\s+/g, '-') : ''}_${today()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('Informe descargado ✓');
+}
+
+function showView(v, btn) {
+    // Si el destino queda bloqueado, cae a Pipeline en vez de dejar la pantalla
+    // en blanco (initDashboard ya no renderiza Pipeline "por las dudas" antes
+    // de saber a dónde se va, así que acá tiene que resolverse el fallback).
+    if ((v === 'stats' || v === 'charts' || v === 'analisis') && !isAdmin()) {
+        toast('Acceso restringido a administradores', true);
+        v = 'pipeline'; btn = document.getElementById('nav-pipeline');
+    }
+    // 'pipeline' usa #view-pipeline (tabla); 'choferes' usa #view-fichas (tarjetas)
+    const domView = (v === 'choferes') ? 'fichas' : v;
+    ['pipeline', 'fichas', 'stats', 'charts', 'analisis', 'informe'].forEach(id => document.getElementById('view-' + id).classList.toggle('hidden', id !== domView));
+    document.querySelectorAll('.inline-nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    // Los chips de selector solo filtran Pipeline y Fichas — en Estadísticas/
+    // Gráficos/Análisis/Informe no hacen nada (esas vistas siempre muestran a
+    // todo el equipo), así que ahí molestan más de lo que ayudan.
+    document.getElementById('selector-chips')?.classList.toggle('hidden', vistaAislada || (v !== 'pipeline' && v !== 'choferes'));
+    const titles = {
+        pipeline: ['Pipeline de Selección', 'Control de búsquedas, seguimiento y feedback'],
+        choferes: ['Choferes y Ayudantes', 'Fichas de postulantes a chofer y ayudante'],
+        stats:    ['Estadísticas', 'Análisis de rendimiento y métricas'],
+        charts:   ['Gráficos', 'Visualizaciones interactivas del pipeline'],
+        analisis: ['Análisis por Selector', 'Conversión, retención, reaperturas, plazos y evolución mensual'],
+        informe:  ['Informe', 'Resumen y exportación de datos para reportes']
+    };
+    document.getElementById('main-title').textContent = titles[v][0];
+    document.getElementById('main-sub').textContent   = titles[v][1];
+    const fChoferSel = document.getElementById('f-chofer-resultado');
+    if (fChoferSel) fChoferSel.classList.toggle('hidden', v !== 'choferes');
+    if (v === 'pipeline' || v === 'choferes') {
+        currentCategoria = (v === 'choferes') ? 'choferes' : 'general';
+        // En vista aislada NO se resetea el filtro de selector: si no, alternar
+        // Pipeline/Choferes rompía el aislamiento y de golpe se veía (y renderizaba)
+        // el total sin filtrar de todas las búsquedas.
+        resetPaginado();
+        if (!vistaAislada) {
+            filteredIds = null;
+            selectorFiltroActivo = '';
+            renderSelectorChips();
+            ['f-tipo','f-depto','f-status','f-reabierta','f-alerta72','f-search','f-chofer-resultado'].forEach(fid => { const el = document.getElementById(fid); if (el) el.value = ''; });
+        }
+        refreshView();
+    }
+    if (VISTAS_PANEL.includes(v)) renderPanelGeneral(v);
+    else renderDataBanner();
+}
+function openModal(id = 'modal-nueva') {
+    document.getElementById(id).classList.remove('hidden');
+}
+function closeModal(id = 'modal-nueva') { document.getElementById(id).classList.add('hidden'); }
+document.querySelectorAll('.modal-bg').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.classList.add('hidden'); }));
+
+
+// ══════════════════════════════════════════════
+//  DIÁLOGOS PROPIOS (reemplazan confirm() / prompt())
+// ══════════════════════════════════════════════
+// La página se ve embebida en Google Sites (iframe con sandbox): ahí el navegador
+// bloquea confirm()/prompt() y devuelven "Cancelar" al instante sin mostrar nada,
+// así que borrar, reabrir o cargar el ingreso no hacía nada. Este diálogo es HTML
+// de la propia página y funciona igual dentro y fuera del iframe.
+function dialogo({ mensaje, okTexto = 'Aceptar', peligro = false, input = null }) {
+    return new Promise(resolve => {
+        const bg = document.createElement('div');
+        bg.className = 'modal-bg';
+        bg.style.zIndex = 200;
+        bg.innerHTML = `
+            <div class="modal-box" style="max-width:440px" role="dialog" aria-modal="true">
+                <div style="font-size:14px;line-height:1.5;white-space:pre-line">${esc(mensaje)}</div>
+                ${input !== null ? `<input class="form-input" style="margin-top:12px" value="${esc(input)}">` : ''}
+                <div class="modal-footer">
+                    <button class="btn-cancel" data-r="no">Cancelar</button>
+                    <button class="btn-primary${peligro ? ' btn-danger' : ''}" data-r="si">${esc(okTexto)}</button>
+                </div>
+            </div>`;
+        const inp = bg.querySelector('input');
+        const cerrar = ok => {
+            document.removeEventListener('keydown', onKey);
+            bg.remove();
+            resolve(input !== null ? (ok ? inp.value : null) : ok);
+        };
+        const onKey = e => { if (e.key === 'Escape') cerrar(false); if (e.key === 'Enter') cerrar(true); };
+        bg.addEventListener('click', e => {
+            if (e.target === bg) cerrar(false);
+            const r = e.target.closest('[data-r]')?.dataset.r;
+            if (r) cerrar(r === 'si');
+        });
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(bg);
+        (inp || bg.querySelector('[data-r="si"]')).focus();
+    });
+}
+function confirmar(mensaje, okTexto = 'Confirmar') {
+    return dialogo({ mensaje, okTexto, peligro: /eliminar/i.test(mensaje) });
+}
+function pedirTexto(mensaje, valorInicial = '') {
+    return dialogo({ mensaje, input: valorInicial });
+}
